@@ -47,7 +47,7 @@ flowchart TB
 | Paso | Qué | Estado |
 |---|---|---|
 | 1 | Esqueleto del repo y primer endpoint | ✅ Hecho |
-| 2 | Base de datos y migraciones | 🔄 En curso (falta Alembic) |
+| 2 | Base de datos y migraciones | ✅ Hecho |
 | 3 | CRUD de servicios + comprobaciones y programación (el corazón) | ⏳ |
 | 4 | Tests y CI (GitHub Actions) | ⏳ |
 | 5 | Autenticación JWT con roles | ⏳ |
@@ -116,7 +116,7 @@ Regla práctica: configuración del proyecto en la raíz; código Python en `src
 
 ---
 
-## Paso 2 · Base de datos y migraciones (26 nov 2026, en curso)
+## Paso 2 · Base de datos y migraciones (26 nov 2026)
 
 ### Qué se ha hecho
 - **Postgres en compose**: segundo servicio `db` con la imagen oficial `postgres:18`, volumen `pgdata`, healthcheck (`pg_isready`) y la API esperando a que esté sana (`depends_on: service_healthy`).
@@ -127,7 +127,20 @@ Regla práctica: configuración del proyecto en la raíz; código Python en `src
 - **`core/db.py`**: `engine` (conexiones), `SessionLocal` (fábrica de sesiones), `Base` (madre de los modelos) y `get_db()` (una sesión por petición).
 - **`/health`** ahora hace `SELECT 1`: si la BD no responde, devuelve **503** en lugar de reventar. Probado parando y arrancando `db`.
 - **Primer modelo** `Service` (tabla `services`): `id`, `name`, `url`, `interval_minutes`, `is_active`, `created_at`.
-- Pendiente: Alembic y primera migración.
+- **Alembic**: `alembic init migrations`; en `migrations/env.py` se importan los modelos, se usa `settings.database_url` y `target_metadata = Base.metadata`. Primera migración autogenerada (`create services table`) y aplicada con `alembic upgrade head`. Comprobado en psql: tablas `services` y `alembic_version`.
+- Ruff excluye `migrations/versions` (código generado).
+
+### Detalle: `default` vs `server_default`
+`default=5` lo pone **Python** al crear el objeto; `server_default=func.now()` lo pone **Postgres**. Por eso en `\d services` solo `created_at` tiene default en la base de datos. Si alguien insertara filas con SQL a mano, solo `created_at` se rellenaría solo.
+
+### Comandos de Alembic
+```bash
+uv run alembic revision --autogenerate -m "mensaje"   # crear migración comparando modelos vs BD
+uv run alembic upgrade head                            # aplicar todas las pendientes
+uv run alembic current                                 # en qué versión está la BD
+uv run alembic downgrade -1                            # deshacer la última
+```
+Flujo cada vez que cambie un modelo: tocar el modelo → `revision --autogenerate` → revisar el archivo generado → `upgrade head` → commit.
 
 ### Decisiones y por qué
 - **SQLAlchemy síncrono** (sin async): más fácil de entender y depurar; de sobra para este volumen.
@@ -290,12 +303,24 @@ Para responder con mis palabras (2-3 frases) y corregir con Claude.
 2. ¿Qué es el `.env` y por qué no está en el repo?
 3. ¿Para qué sirven Ruff y pytest si el código ya funciona?
 
-### Paso 2
-1. ¿Qué es un ORM y qué ganas usándolo frente a escribir SQL a mano?
-2. ¿Por qué usas migraciones en lugar de crear las tablas a mano?
-3. ¿Qué pasa con tus datos si borras el contenedor de Postgres? ¿Por qué?
+### Paso 2 (respondidas y corregidas, 26 nov)
+
+**1. ¿Qué es un ORM y qué ganas usándolo frente a escribir SQL a mano?**
+> Un ORM traduce entre objetos de Python y tablas de la base de datos. Uso SQLAlchemy: defino una clase `Service` y él genera el SQL para guardar y leer filas. Gano autocompletado, comprobación de tipos y menos errores que escribiendo SQL a mano, aunque sigo necesitando entender el SQL de debajo.
+
+⚠️ Confusión a evitar: Ruff no tiene nada que ver. Ruff revisa el estilo del código Python (corrector ortográfico); el ORM habla con la base de datos (intérprete).
+
+**2. ¿Por qué usas migraciones en lugar de crear las tablas a mano?**
+> Las migraciones son el control de versiones de la estructura de la base de datos. Cada cambio (crear tabla, añadir columna) es un archivo en Git, y Alembic aplica en cada entorno solo los que faltan, en orden. Así mi PC, el portátil y producción tienen siempre la misma estructura, sin cambios a mano.
+
+⚠️ No se migran datos, se migra la estructura (el molde, no el contenido). Como el historial de versiones de una plantilla en Figma. Y cuando hay datos, la migración cambia el molde sin perderlos.
+
+**3. ¿Qué pasa con tus datos si borras el contenedor de Postgres? ¿Por qué?**
+> Nada, porque los datos no están dentro del contenedor sino en un volumen de Docker, que existe aparte. El contenedor es desechable: puedo borrarlo o recrearlo y el nuevo usa el mismo volumen. Solo los perdería borrando el volumen (`docker compose down -v`); en producción habría backups aparte.
+
+⚠️ En local no hay copias de seguridad automáticas. Nadie las hace por mí.
 
 ---
 
 ## Próximo paso
-**Paso 2 (cierre)**: Alembic y primera migración, que crea la tabla `services` en Postgres.
+**Paso 3 · CRUD de servicios + comprobaciones**: endpoints para dar de alta, listar, editar y borrar servicios (schemas Pydantic), y después el vigilante (httpx + APScheduler) que los visita y guarda cada resultado.
