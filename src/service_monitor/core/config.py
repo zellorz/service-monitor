@@ -6,6 +6,7 @@ class Settings(BaseSettings):
 
     app_name: str = "Service Monitor"
     environment: str = "local"
+    scheduler_enabled: bool = True
 
     postgres_user: str
     postgres_password: str

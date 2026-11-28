@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20.1",
+    "apscheduler>=3.10,<4",
     "fastapi[standard]>=0.165.0",
     "httpx>=0.28.1",
     "psycopg[binary]>=3.3.9",
