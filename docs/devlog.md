@@ -48,7 +48,7 @@ flowchart TB
 |---|---|---|
 | 1 | Esqueleto del repo y primer endpoint | ✅ Hecho |
 | 2 | Base de datos y migraciones | ✅ Hecho |
-| 3 | CRUD de servicios + comprobaciones y programación (el corazón) | ⏳ |
+| 3 | CRUD de servicios + comprobaciones y programación (el corazón) | 🔄 3a (CRUD) hecho · 3b (vigilante) pendiente |
 | 4 | Tests y CI (GitHub Actions) | ⏳ |
 | 5 | Autenticación JWT con roles | ⏳ |
 | 6 | Front mínimo (React + TS + Tailwind + Recharts) | ⏳ |
@@ -150,7 +150,47 @@ Flujo cada vez que cambie un modelo: tocar el modelo → `revision --autogenerat
 
 ---
 
+## Paso 3a · CRUD de servicios (28 nov 2026)
+
+### Qué se hizo
+- **Schemas** en `schemas/service.py`: `ServiceBase` (campos comunes), `ServiceCreate`, `ServiceUpdate` (todo opcional) y `ServiceRead` (con `id` y `created_at`, `from_attributes=True` para construirlo desde el modelo).
+- **Router** `api/routes/services.py` con prefijo `/services` y cinco endpoints: `GET` (listar), `POST` (crear, 201), `GET /{id}`, `PATCH /{id}`, `DELETE /{id}` (204).
+- `get_service_or_404()` reutilizado por los tres endpoints que buscan por ID.
+- Probado en Swagger y comprobado en Postgres con `SELECT`.
+
+### Ideas clave del código
+- `payload: ServiceCreate` → FastAPI lee el JSON, lo valida y lo entrega comprobado.
+- Guardar con SQLAlchemy: `db.add()` → `db.commit()` (aquí se escribe de verdad) → `db.refresh()` (relee id y fecha).
+- `model_dump(exclude_unset=True)` en el PATCH → solo los campos enviados.
+- `HttpUrl` normaliza las URLs (añade la `/` final).
+- Fechas en UTC (la `Z` final).
+
+### Lecciones del paso 3a
+- **Swagger rellena el cuerpo con un ejemplo**: si no se borra, se envía. Así acabaron dos servicios llamados "string" y Google renombrado.
+- **Los IDs no se reutilizan**: los huecos son normales.
+- **Sin `ORDER BY`, Postgres no garantiza orden.**
+- Si una terminal está ocupada por el servidor, abrir otra (**+** o Ctrl+Shift+ñ), o dividir el panel.
+
+---
+
 ## Conceptos clave
+
+### CRUD y REST
+CRUD = Create, Read, Update, Delete. REST = una ruta por recurso (`/services`) y el método HTTP dice la operación.
+
+| Operación | Método + ruta | Respuesta |
+|---|---|---|
+| Crear | `POST /services` | 201 + el creado |
+| Listar | `GET /services` | 200 + lista |
+| Ver uno | `GET /services/5` | 200 / 404 |
+| Modificar | `PATCH /services/5` | 200 + actualizado |
+| Borrar | `DELETE /services/5` | 204 (vacío) |
+
+### Schema
+La plantilla de un formulario: qué campos lleva un JSON, de qué tipo y con qué reglas. Uno por dirección, como en un hotel: ficha de check-in (`Create`, sin habitación ni fecha), formulario de cambios (`Update`, todo opcional), recibo (`Read`, con todo).
+
+### Códigos 4xx vs 5xx
+4xx = el problema está en lo que pidió el cliente (404 no existe, 422 datos inválidos). 5xx = el problema está en el servidor (500 error en mi código, 503 una dependencia caída).
 
 ### Base de datos, tabla, SQL
 Postgres guarda los datos en **tablas** (filas y columnas, como una hoja de cálculo). Se le habla en **SQL**: `SELECT * FROM services WHERE interval_minutes = 5;`
@@ -320,7 +360,20 @@ Para responder con mis palabras (2-3 frases) y corregir con Claude.
 
 ⚠️ En local no hay copias de seguridad automáticas. Nadie las hace por mí.
 
+### Paso 3a (respondidas y corregidas, 28 nov)
+
+**1. ¿Por qué tres schemas (`ServiceCreate`, `ServiceUpdate`, `ServiceRead`) y no uno?**
+> Un schema define la forma del JSON que entra o sale de la API, y Pydantic lo valida. Tengo uno por dirección: lo que se envía para crear (sin `id` ni fecha, que los pone la base de datos), lo que se envía para modificar (todo opcional) y lo que la API devuelve (con todo). Así controlo qué puede enviar el cliente y qué ve.
+
+**2. ¿Qué diferencia hay entre un 404 y un 422?**
+> 404: el recurso que pido no existe (`/services/99`). 422: la petición llegó pero los datos no pasan la validación del schema (URL inválida, intervalo 0). Los dos son errores del cliente (4xx): uno es "no hay nada aquí", el otro "lo que me mandas no es válido".
+
+⚠️ El 422 no es un error de sintaxis: el JSON está bien formado, pero su contenido no cumple las reglas. Se rechaza antes de llegar a mi código.
+
+**3. ¿Por qué un servicio nuevo no reutiliza el ID de uno borrado?**
+> Postgres usa una secuencia que solo avanza: un ID se consume aunque la fila se borre. Así un ID identifica siempre a la misma fila, y las tablas que lo referencian (como las comprobaciones) nunca apuntan a algo distinto.
+
 ---
 
 ## Próximo paso
-**Paso 3 · CRUD de servicios + comprobaciones**: endpoints para dar de alta, listar, editar y borrar servicios (schemas Pydantic), y después el vigilante (httpx + APScheduler) que los visita y guarda cada resultado.
+**Paso 3b · El vigilante**: tabla `checks` (resultado de cada comprobación), función que visita una URL con httpx y guarda el resultado, y APScheduler para ejecutarlo cada X minutos.
