@@ -1,11 +1,13 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from service_monitor.core.db import get_db
-from service_monitor.models import Service
+from service_monitor.models import Check, Service
+from service_monitor.monitoring.checker import run_check
+from service_monitor.schemas.check import CheckRead
 from service_monitor.schemas.service import ServiceCreate, ServiceRead, ServiceUpdate
 
 router = APIRouter(prefix="/services", tags=["services"])
@@ -55,3 +57,26 @@ def delete_service(service_id: int, db: DbSession) -> None:
     service = get_service_or_404(db, service_id)
     db.delete(service)
     db.commit()
+
+@router.post("/{service_id}/check", status_code=status.HTTP_201_CREATED)
+def check_service_now(service_id: int, db: DbSession) -> CheckRead:
+    """Lanza una comprobación inmediata de un servicio."""
+    service = get_service_or_404(db, service_id)
+    return run_check(db, service)
+
+
+@router.get("/{service_id}/checks")
+def list_checks(
+    service_id: int,
+    db: DbSession,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+) -> list[CheckRead]:
+    """Historial de comprobaciones, de la más reciente a la más antigua."""
+    get_service_or_404(db, service_id)
+    stmt = (
+        select(Check)
+        .where(Check.service_id == service_id)
+        .order_by(Check.checked_at.desc())
+        .limit(limit)
+    )
+    return db.scalars(stmt).all()
