@@ -16,17 +16,19 @@ flowchart TB
 
     subgraph compose["Docker compose · se levanta con un comando"]
         api["API · FastAPI<br/>endpoints, mi código"]
-        checker["Vigilante · httpx + APScheduler<br/>(pendiente)"]
+        checker["Vigilante · httpx + APScheduler<br/>comprueba cada minuto"]
         db[("PostgreSQL<br/>guarda los datos")]
         vol[["Volumen pgdata<br/>sobrevive a reinicios"]]
         api --> db
-        checker -.-> db
+        checker --> db
         db --> vol
     end
 
-    web(["Webs vigiladas<br/>(pendiente)"])
+    web(["Webs vigiladas"])
+    tg(["Telegram<br/>(pendiente)"])
     browser --> api
-    checker -. visita cada X min .-> web
+    checker -- visita cada X min --> web
+    checker -. avisa si cae .-> tg
 
     subgraph tools["Herramientas de desarrollo"]
         uv["uv · instala librerías"]
@@ -39,7 +41,7 @@ flowchart TB
 - **API** = el mostrador: por ahí se dan de alta webs, se consulta el historial... Es mi código.
 - **PostgreSQL** = el archivador: guarda la lista de webs (`services`) y cada comprobación hecha. Sale de la imagen oficial de Postgres; sus datos viven en el volumen.
 - **Docker compose** = la caja que monta las piezas juntas en cualquier ordenador.
-- **Vigilante** = la pieza que falta: cada X minutos visita las webs y apunta el resultado.
+- **Vigilante** = cada minuto mira qué webs toca comprobar, las visita y apunta el resultado. Falta que avise por Telegram.
 - **Herramientas** = el taller: uv instala, Ruff ordena, pytest comprueba, GitHub guarda y enseña.
 
 ## Hoja de ruta
@@ -48,7 +50,7 @@ flowchart TB
 |---|---|---|
 | 1 | Esqueleto del repo y primer endpoint | ✅ Hecho |
 | 2 | Base de datos y migraciones | ✅ Hecho |
-| 3 | CRUD de servicios + comprobaciones y programación (el corazón) | 🔄 3a (CRUD) hecho · 3b (vigilante) pendiente |
+| 3 | CRUD de servicios + comprobaciones y programación (el corazón) | 🔄 3a (CRUD) y 3b (vigilante) hechos · 3c (alertas) pendiente |
 | 4 | Tests y CI (GitHub Actions) | ⏳ |
 | 5 | Autenticación JWT con roles | ⏳ |
 | 6 | Front mínimo (React + TS + Tailwind + Recharts) | ⏳ |
@@ -173,7 +175,75 @@ Flujo cada vez que cambie un modelo: tocar el modelo → `revision --autogenerat
 
 ---
 
+## Paso 3b · El vigilante (28 nov 2026)
+
+### 3b.1 · Comprobaciones manuales
+- **Modelo `Check`** (tabla `checks`): `id`, `service_id` (clave foránea a `services.id` con `ondelete="CASCADE"` e índice), `checked_at`, `is_up`, `status_code`, `response_time_ms`, `error`. Migración autogenerada y aplicada.
+- **Schema `CheckRead`** (solo lectura: las comprobaciones no las crea el cliente).
+- **`monitoring/checker.py` → `run_check(db, service)`**: visita la URL con httpx (timeout 10 s, sigue redirecciones), mide el tiempo y guarda un `Check`. Dos tipos de caída: responde con error (`status_code` 500…) o no responde (DNS, timeout → va al `except`, guarda el motivo en `error`).
+- **Endpoints**: `POST /services/{id}/check` (comprueba ahora, 201) y `GET /services/{id}/checks?limit=50` (historial, más reciente primero).
+- Probado: Google → `is_up: true`, 200, ~250 ms. Dominio inexistente → `is_up: false`, `ConnectError: Name or service not known`. CASCADE comprobado.
+
+### 3b.2 · Comprobaciones automáticas
+- **APScheduler** (`>=3.10,<4`: versión 4 cambia la API; limitar evita roturas).
+- **`monitoring/scheduler.py`**: un único job cada 60 s, `check_due_services()`, que mira los servicios activos y comprueba los que llevan más de su intervalo sin comprobarse (con 10 s de margen).
+- **`lifespan` en `main.py`**: arranca el scheduler al iniciar la API y lo apaga al cerrarla. Interruptor `SCHEDULER_ENABLED` en `Settings`.
+- **Logging**: `logging.basicConfig(level=INFO)` + `logger = logging.getLogger(__name__)`; cada módulo firma sus mensajes.
+- WARNING "was missed by 0:00:02": el primer tic se calculaba al importar y el scheduler arrancaba 2 s después; APScheduler solo tolera 1 s por defecto. Solución: `misfire_grace_time=30`.
+
+### Decisiones y por qué
+- **Lógica fuera de los endpoints** (`monitoring/`): la usan el endpoint y el scheduler.
+- **Un tic único** en vez de una tarea por servicio: la BD es la única fuente de verdad, sin sincronizar tareas con el CRUD.
+- **Scheduler dentro del proceso de la API**: simple para empezar. Limitación conocida: con varias instancias de la API habría varios relojes duplicando comprobaciones (solución futura: proceso aparte o un lock, p. ej. con Redis).
+- **Consulta del último check por servicio** (una consulta por servicio): simple y suficiente para pocos servicios; con miles se haría en una sola consulta.
+
+### Lecciones del paso 3b
+- En Swagger, lo que cuenta es **Server response**; **Responses** es documentación fija con datos de ejemplo.
+- `[]` con 200 = lista vacía (el recurso existe, pero no tiene elementos). Distinto de 404.
+- `POST .../check` hace; `GET .../checks` consulta.
+- JSON: textos entre comillas, números sin ellas.
+- 422 con "JSON decode error" = JSON mal escrito; 422 con otro `msg` = datos que no pasan la validación.
+
+---
+
+## Rutina de trabajo
+
+### Al empezar
+1. Abrir Docker Desktop (esperar a la ballena quieta).
+2. VS Code → File → Open Recent → `service-monitor [WSL: Ubuntu]`.
+3. `docker compose up -d db` y `docker compose ps` (esperar `healthy`).
+4. Si he trabajado en el portátil: `git pull`.
+5. `uv run fastapi dev src/service_monitor/main.py` en una terminal; comandos en otra.
+
+### Al terminar
+1. Ctrl+C en la terminal del servidor.
+2. `docker compose stop` (los datos siguen en el volumen).
+3. Opcional, para liberar RAM (jugar): cerrar Docker Desktop y `wsl --shutdown` en PowerShell.
+
+### ¿`fastapi dev` o `docker compose`?
+| Situación | Qué usar |
+|---|---|
+| Programando (lo normal) | `docker compose up -d db` + `uv run fastapi dev ...` (recarga sola, logs al momento) |
+| Comprobar "como en producción" (antes de un commit importante, si toco Dockerfile/compose, para enseñarlo) | `docker compose up --build` |
+
+Nunca los dos a la vez: comparten el puerto 8000 y habría dos relojes.
+
+---
+
 ## Conceptos clave
+
+### Clave foránea
+Columna que apunta al `id` de otra tabla (`checks.service_id` → `services.id`). Postgres impide referencias a filas inexistentes. `ondelete="CASCADE"`: al borrar el servicio, se borran sus comprobaciones.
+
+### Parámetro de ruta vs parámetro de consulta
+- Ruta: parte de la URL, identifica el recurso (`/services/5`).
+- Consulta (*query*): detrás de `?`, opciones (`/services/5/checks?limit=10`).
+
+### Tarea en segundo plano y lifespan
+APScheduler es un despertador dentro del proceso de la API que ejecuta una función cada X tiempo. `lifespan` es el mecanismo de FastAPI para hacer cosas al arrancar (encender el reloj) y al apagar (pararlo).
+
+### Logs y niveles
+INFO = informativo · WARNING = algo raro pero sigue funcionando · ERROR = algo ha fallado. Cada línea indica qué módulo la escribió.
 
 ### CRUD y REST
 CRUD = Create, Read, Update, Delete. REST = una ruta por recurso (`/services`) y el método HTTP dice la operación.
@@ -373,7 +443,22 @@ Para responder con mis palabras (2-3 frases) y corregir con Claude.
 **3. ¿Por qué un servicio nuevo no reutiliza el ID de uno borrado?**
 > Postgres usa una secuencia que solo avanza: un ID se consume aunque la fila se borre. Así un ID identifica siempre a la misma fila, y las tablas que lo referencian (como las comprobaciones) nunca apuntan a algo distinto.
 
+### Paso 3b (respondidas y corregidas, 28 nov)
+
+**1. ¿Por qué `run_check` está en un módulo aparte y no dentro del endpoint?**
+> Porque la usan dos sitios: el endpoint para lanzar una comprobación manual y el scheduler, que no recibe peticiones HTTP. Separando la lógica de las rutas la escribo una sola vez y puedo testearla directamente. Las rutas se quedan finas: reciben la petición y delegan.
+
+⚠️ El motivo principal es la reutilización (el scheduler no puede llamar a un endpoint); la facilidad para testear es un beneficio añadido.
+
+**2. ¿Qué diferencia hay entre `POST /services/1/check` y `GET /services/1/checks`?**
+> El POST lanza una comprobación ahora: visita la URL y guarda el resultado. El GET devuelve el historial ya hecho sin tocar nada. Convención REST: POST crea, GET solo lee y se puede repetir sin efectos.
+
+**3. ¿Por qué un solo tic cada minuto en lugar de una tarea por servicio?**
+> Un único job cada minuto consulta en la BD qué servicios activos llevan más tiempo sin comprobarse que su intervalo. Así no sincronizo tareas programadas con los cambios del CRUD: la BD es la única fuente de verdad, y un PATCH al intervalo se aplica en el siguiente tic.
+
+⚠️ La clave no es optimizar, es simplificar y evitar desincronizaciones (servicios que nadie vigila tras un reinicio).
+
 ---
 
 ## Próximo paso
-**Paso 3b · El vigilante**: tabla `checks` (resultado de cada comprobación), función que visita una URL con httpx y guarda el resultado, y APScheduler para ejecutarlo cada X minutos.
+**Paso 3c · Alertas**: avisar por Telegram cuando un servicio pasa de UP a DOWN (y cuando se recupera), sin repetir el aviso en cada comprobación.
